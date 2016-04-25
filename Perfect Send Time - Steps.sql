@@ -27,6 +27,15 @@ declare @taxonomy_table as VARCHAR(100) = 'taxonomy_l1362_T8'
 
 declare @sql as nvarchar(max)
 
+declare @timewindow as int = -90
+declare @country_id as int = 22
+declare @listid as int = 0
+declare @usertable as varchar(150) = 'Mys.' + @sub +'_Mys_USERS'
+declare @optintable as varchar(150) = 'Mys.' + @sub +'_Mys_data_optin_pref'
+declare @localetable as varchar(150) = 'Mys.' + @sub +'_Mys_data_locale'
+
+SET @listid = (select ID from lists where tablename = @usertable)
+
 SET @sql = '
 IF NOT EXISTS (SELECT * FROM sysobjects WHERE name=''' + @classification_table + ''' AND xtype=''U'')
     CREATE TABLE ' + @classification_table + ' (
@@ -66,15 +75,6 @@ EXEC sp_executesql @sql
 SET @sql = 'truncate table ' + @sub + '_DATA_PST_SEGMENT_COUNTS' 
 EXEC sp_executesql @sql
 
-declare @timewindow as int = -90
-declare @country_id as int = 156
-declare @listid as int = 0
-declare @usertable as varchar(150) = 'Mys.' + @sub +'_Mys_USERS'
-declare @optintable as varchar(150) = 'Mys.' + @sub +'_Mys_data_optin_pref'
-declare @localetable as varchar(150) = 'Mys.' + @sub +'_Mys_data_locale'
-
-SET @listid = (select ID from lists where tablename = @usertable)
-
 --STEP1
 --user selection 
 -- ..no check BPM state because we want to know the opens of the welcome mails also.
@@ -82,7 +82,11 @@ SET @listid = (select ID from lists where tablename = @usertable)
 SET @sql = '
 MERGE ' + @classification_table + ' AS target USING 
 (
-	select id as userid from ' + @usertable + ' users (nolock)
+	select id as userid,myslocaleid from ' + @usertable + ' users (nolock)
+	inner join ' + @localetable + ' locale (nolock) 
+	on users.id = locale.userid 
+	AND 
+	myscountryid = ' + cast(@country_id as varchar(20)) + ' 
 	where 
 		exists (
 			select 1 from ' + @optintable + ' optins (nolock)
@@ -91,23 +95,49 @@ MERGE ' + @classification_table + ' AS target USING
 			AND
 			users.id = optins.userid
 			)
-		AND
-		exists (
-			select 1 from ' + @localetable + ' locale (nolock)
-			where 
-			myscountryid = ' + cast(@country_id as varchar(20)) + '
-			AND
-			users.id = locale.userid
-		)
 ) AS source
   ON ( 		
   		target.userid = source.userid
   	 )
     WHEN NOT MATCHED THEN
-  		INSERT (created_dt,userid,listid)
-     	VALUES (getutcdate(),source.userid, '+ cast(@listid as varchar(20)) + ');'
+  		INSERT (created_dt,userid,listid,myslocaleid)
+     	VALUES (getutcdate(),source.userid, '+ cast(@listid as varchar(20)) + ',source.myslocaleid);'
 
 EXEC sp_executesql @sql
+
+
+--STEP1b - Optional when using 2 languages
+--user selection 
+-- ..no check BPM state because we want to know the opens of the welcome mails also.
+-- declare @country_id as int = 156
+-- SET @sql = '
+-- MERGE ' + @classification_table + ' AS target USING 
+-- (
+-- 	select id as userid,myslocaleid from ' + @usertable + ' users (nolock)
+-- 	inner join ' + @localetable + ' locale (nolock) 
+-- 	on users.id = locale.userid 
+-- 	AND 
+-- 	myscountryid = ' + cast(@country_id as varchar(20)) + '
+-- 	OR
+-- 	myscountryid = ' + cast(@country_id2 as varchar(20)) + '
+-- 	where 
+-- 		exists (
+-- 			select 1 from ' + @optintable + ' optins (nolock)
+-- 			where 
+-- 			MYSOPTINPREFID <> 3
+-- 			AND
+-- 			users.id = optins.userid
+-- 			)
+-- ) AS source
+--   ON ( 		
+--   		target.userid = source.userid
+--   	 )
+--     WHEN NOT MATCHED THEN
+--   		INSERT (created_dt,userid,listid,myslocaleid)
+--      	VALUES (getutcdate(),source.userid, '+ cast(@listid as varchar(20)) + ',source.myslocaleid);'
+
+-- EXEC sp_executesql @sql
+
 
 
 --STEP2
@@ -128,7 +158,6 @@ USING
 	AND
 	listid = ' + cast(@listid as varchar(6)) + ' 
 	and flags.dt > dateadd(day, ' + cast(@timewindow as VARCHAR(6)) + ',getdate())
-	/* --temp disabled. Taxonomy on MYS was only recently activated. need more data
 	and 
 	 EXISTS (
 	 		select 1 from ' + @taxonomy_table+ ' tax (nolock)
@@ -137,7 +166,6 @@ USING
 	 			and
 	 			flags.userid = tax.userid
 	 		)
-	*/
 	and 
 	EXISTS
 		( 
@@ -172,7 +200,8 @@ SET
 target.MODIFIED_DT = getutcdate(),
 target.PREFERRED_WEEKDAY = source.weekday,
 target.PREFERRED_HOUR = source.hour,
-target.PERFECT_HOUR = source.phour
+target.PERFECT_HOUR = source.phour,
+target.HAS_DEFAULT = 0
 FROM '+ @classification_table+' target (nolock)
 INNER JOIN
 (
@@ -227,7 +256,8 @@ SET
 classification.MODIFIED_DT = getutcdate(),
 classification.PREFERRED_WEEKDAY = @default_weekday,
 classification.PREFERRED_HOUR = @default_hourofday,
-classification.PERFECT_HOUR = @default_perfecthour
+classification.PERFECT_HOUR = @default_perfecthour,
+classification.HAS_DEFAULT = 1
 from '+ @classification_table +' classification (nolock)
 where 
 not exists (select 1 from '+ @counts_table +' counts (nolock) where counts.userid = classification.userid)
@@ -259,7 +289,7 @@ build the flow as normal.
 --Test table
 --create table #psttemp (datehour datetime,hour int)
 
-declare @campaignid as INT = 6100
+declare @campaignid as INT = 0
 declare @startdate as datetime = '2016-03-08 00:00:00' --input for startdate, will be parameter if used in SP
 
 declare @starthour as INT = 9; --GMT 09:00 , CET 10:00
@@ -276,6 +306,8 @@ declare @insertdate as datetime;
 declare @offset as int = 3; --used in the calculation for the correct datetime.
 
 declare @xml as nvarchar(max);
+
+--TODO check if campaign exists and higher than 0 + date check if its in the future.
 
 while (@daycounter <= @endday)
 begin 
